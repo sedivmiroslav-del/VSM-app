@@ -439,6 +439,29 @@ function readFromWindowName() {
   return null;
 }
 
+// Pomocník: konverzia dát z IndexedDB na ArrayBuffer (podporí Uint8Array aj starý Blob)
+async function idbDataToArrayBuffer(data) {
+  try {
+    if (!data) return null;
+    if (data instanceof ArrayBuffer) return data;
+    if (typeof data.arrayBuffer === 'function') {
+      // Blob
+      return await data.arrayBuffer();
+    }
+    if (data.buffer instanceof ArrayBuffer) {
+      // TypedArray (napr. Uint8Array)
+      const view = new Uint8Array(data.buffer, data.byteOffset || 0, data.byteLength || data.length || data.buffer.byteLength);
+      // Vytvoríme kópiu do presnej dĺžky
+      const copy = new Uint8Array(view.byteLength);
+      copy.set(view);
+      return copy.buffer;
+    }
+  } catch (e) {
+    console.warn('idbDataToArrayBuffer error:', e);
+  }
+  return null;
+}
+
 // Ukladanie s návratom výsledkov (ktoré úložiská uspeli)
 async function saveLastPdf(arrayBuffer, name) {
   const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
@@ -471,14 +494,15 @@ async function saveLastPdf(arrayBuffer, name) {
     }
   } catch (e) { console.warn('Ukladanie do localStorage zlyhalo:', e); }
 
-  // IndexedDB
+  // IndexedDB – ulož priamo Uint8Array (robustnejšie než Blob)
   try {
     const db = await openPdfDb();
     await new Promise((resolve, reject) => {
       const tx = db.transaction(PDF_STORE, 'readwrite');
-      tx.oncomplete = () => { db.close(); resolve(); };
-      tx.onerror = () => { const err = tx.error || new Error('Tx error'); db.close(); reject(err); };
-      tx.objectStore(PDF_STORE).put({ name, data: blob, savedAt: Date.now() }, 'last');
+      tx.oncomplete = () => { try { db.close(); } catch {} resolve(); };
+      tx.onerror = () => { const err = tx.error || new Error('Tx error'); try { db.close(); } catch {} reject(err); };
+      const bytes = new Uint8Array(arrayBuffer); // uložíme bajty
+      tx.objectStore(PDF_STORE).put({ name, data: bytes, savedAt: Date.now() }, 'last');
     });
     result.idb = true;
   } catch (e) { console.warn('Ukladanie do IndexedDB zlyhalo:', e); }
@@ -486,22 +510,22 @@ async function saveLastPdf(arrayBuffer, name) {
   return result;
 }
 
-// Obnova: najprv IndexedDB, potom sessionStorage, localStorage, napokon window.name
+// Obnova: preferuj IndexedDB, potom sessionStorage, localStorage, nakoniec window.name
 async function loadLastPdfRecord() {
   // 1) IndexedDB – najspoľahlivejšie pre väčšie PDF
   try {
     const db = await openPdfDb();
     const rec = await new Promise((resolve, reject) => {
       const tx = db.transaction(PDF_STORE, 'readonly');
-      tx.oncomplete = () => db.close();
-      tx.onerror = () => { const err = tx.error || new Error('Tx error'); db.close(); reject(err); };
+      tx.oncomplete = () => { try { db.close(); } catch {} };
+      tx.onerror = () => { const err = tx.error || new Error('Tx error'); try { db.close(); } catch {} reject(err); };
       const req = tx.objectStore(PDF_STORE).get('last');
       req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => reject(req.error || new Error('Get error'));
     });
     if (rec && rec.data) {
-      const ab = await rec.data.arrayBuffer();
-      return { name: rec.name || 'PDF', arrayBuffer: ab };
+      const ab = await idbDataToArrayBuffer(rec.data);
+      if (ab) return { name: rec.name || 'PDF', arrayBuffer: ab };
     }
   } catch (e) { console.warn('Čítanie z IndexedDB zlyhalo:', e); }
 
@@ -696,7 +720,6 @@ async function focusMarkerByNumber(num) {
 }
 
 // ---- Viewer ----
-// Načítanie cez tlačidlo "Vybrať súbor"
 fileInput.addEventListener('change', async (e) => {
   const file = e.target.files?.[0]; if (!file) return;
   try {
@@ -706,7 +729,6 @@ fileInput.addEventListener('change', async (e) => {
     // Ulož a skontroluj, kam sa naozaj podarilo uložiť
     const flags = await saveLastPdf(ab, file.name);
     const test = await loadLastPdfRecord(); // over, že sa vieme obnoviť
-
     const savedTo = Object.entries(flags).filter(([k,v])=>v).map(([k])=>k).join(', ') || 'nič';
     if (test && test.arrayBuffer) {
       statusEl.textContent = `PDF načítané. Uložené do: ${savedTo}.`;
@@ -903,6 +925,66 @@ dohWdaysPerWeekInput.addEventListener('input', saveDohPrefs);
 [dohInventoryInput, dohPerfPeriodInput].forEach(inp=>inp.addEventListener('keydown',(e)=>{ if(e.key==='Enter') computeDoh(); }));
 document.addEventListener('keydown',(e)=>{ if(e.key==='Escape' && !dohOverlay.hidden) closeDoh(); });
 
+// Diagnostika obnovy (otvor konzolu a spusti window.vsmDiag() ak potrebuješ)
+async function diagnoseRestore() {
+  const out = { idb: null, session: null, local: null, windowName: null, final: null };
+  try {
+    // IDB
+    try {
+      const db = await openPdfDb();
+      const rec = await new Promise((resolve, reject) => {
+        const tx = db.transaction(PDF_STORE, 'readonly');
+        tx.oncomplete = () => { try { db.close(); } catch {} };
+        tx.onerror = () => { const err = tx.error || new Error('Tx error'); try { db.close(); } catch {} reject(err); };
+        const req = tx.objectStore(PDF_STORE).get('last');
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error || new Error('Get error'));
+      });
+      out.idb = !!(rec && rec.data);
+    } catch (e) { out.idb = false; console.warn('Diagnose IDB:', e); }
+
+    // session
+    try {
+      const sUrl = sessionStorage.getItem(PDF_SESS_DATAURL_KEY);
+      out.session = !!sUrl;
+    } catch (e) { out.session = false; console.warn('Diagnose session:', e); }
+
+    // local
+    try {
+      const lUrl = localStorage.getItem(PDF_DATAURL_KEY);
+      out.local = !!lUrl;
+    } catch (e) { out.local = false; console.warn('Diagnose local:', e); }
+
+    // window.name
+    try {
+      const wn = readFromWindowName();
+      out.windowName = !!wn;
+    } catch (e) { out.windowName = false; console.warn('Diagnose window.name:', e); }
+
+    // finálny pokus s aktuálnou logikou:
+    const rec = await loadLastPdfRecord();
+    out.final = !!rec;
+  } catch (e) {
+    console.warn('Diagnose final:', e);
+  }
+  console.table(out);
+}
+window.vsmDiag = diagnoseRestore;
+
+// Voliteľné: požiadať o perzistentné úložisko (zvyšuje šancu, že IDB prežije)
+async function tryPersistStorage() {
+  try {
+    if (!('storage' in navigator)) return;
+    const persisted = await navigator.storage.persisted();
+    if (!persisted) {
+      const ok = await navigator.storage.persist();
+      console.log('navigator.storage.persist:', ok);
+    }
+  } catch (e) {
+    console.warn('Persist storage request failed:', e);
+  }
+}
+
 // Inicializácie
 loadRows(); renderRows(); loadMarkers(); renderMarkers(); if (rows.length===0) addEmptyRow();
 setPanelOpen(false); updatePanelHandleIcon();
@@ -910,6 +992,8 @@ setPanelOpen(false); updatePanelHandleIcon();
 // Obnova PDF po načítaní (IndexedDB -> sessionStorage -> localStorage -> window.name)
 window.addEventListener('load', async () => {
   try {
+    tryPersistStorage();
+    await window.vsmDiag(); // zaloguje dostupnosť úložísk (pozri Console)
     statusEl.textContent = 'Obnovujem posledné PDF...';
     const rec = await loadLastPdfRecord();
     if (rec && rec.arrayBuffer) {
