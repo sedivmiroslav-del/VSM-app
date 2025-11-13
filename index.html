@@ -300,9 +300,8 @@ body.panel-open #panelHandle { right: var(--side-open-w, calc(var(--side-w) * va
 
 <!-- PDF.js knižnica -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<!-- JavaScript je v Časti 2 -->
-</body>
-</html>
+
+<!-- Aplikácia -->
 <script>
 // PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
@@ -376,7 +375,10 @@ function openPdfDb() {
   return new Promise((resolve, reject) => {
     if (!('indexedDB' in window)) return reject(new Error('IndexedDB nie je podporované'));
     const req = indexedDB.open(PDF_DB_NAME, 1);
-    req.onupgradeneeded = () => { const db = req.result; if (!db.objectStoreNames.contains(PDF_STORE)) db.createObjectStore(PDF_STORE); };
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(PDF_STORE)) db.createObjectStore(PDF_STORE);
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error || new Error('Nepodarilo sa otvoriť DB'));
   });
@@ -437,40 +439,39 @@ function readFromWindowName() {
   return null;
 }
 
+// Ukladanie s návratom výsledkov (ktoré úložiská uspeli)
 async function saveLastPdf(arrayBuffer, name) {
   const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
+  const result = { windowName:false, session:false, local:false, idb:false };
 
-  // 1) window.name (istota pri refreshi v tom istom tabu)
+  // window.name
   try {
     const dataUrl = await blobToDataUrl(blob);
     saveToWindowName(dataUrl, name);
-  } catch (e) {
-    console.warn('Ukladanie do window.name zlyhalo:', e);
-  }
+    result.windowName = true;
+  } catch (e) { console.warn('Ukladanie do window.name zlyhalo:', e); }
 
-  // 2) sessionStorage (tiež prežije refresh v tom istom tabu)
+  // sessionStorage
   try {
     const dataUrl = await blobToDataUrl(blob);
     sessionStorage.setItem(PDF_SESS_DATAURL_KEY, dataUrl);
     sessionStorage.setItem(PDF_SESS_NAME_KEY, name);
-  } catch (e) {
-    console.warn('Ukladanie do sessionStorage zlyhalo:', e);
-  }
+    result.session = true;
+  } catch (e) { console.warn('Ukladanie do sessionStorage zlyhalo:', e); }
 
-  // 3) localStorage (ak sa zmestí ~5MB)
+  // localStorage (limit ~5MB)
   try {
     const dataUrl = await blobToDataUrl(blob);
     if (dataUrl.length <= 4_800_000) {
       localStorage.setItem(PDF_DATAURL_KEY, dataUrl);
       localStorage.setItem(PDF_NAME_KEY, name);
+      result.local = true;
     } else {
       console.warn('PDF je príliš veľké pre localStorage fallback.');
     }
-  } catch (e) {
-    console.warn('Ukladanie do localStorage zlyhalo:', e);
-  }
+  } catch (e) { console.warn('Ukladanie do localStorage zlyhalo:', e); }
 
-  // 4) IndexedDB (dlhšia perzistencia – file:// ju nie vždy povolí)
+  // IndexedDB
   try {
     const db = await openPdfDb();
     await new Promise((resolve, reject) => {
@@ -479,15 +480,30 @@ async function saveLastPdf(arrayBuffer, name) {
       tx.onerror = () => { const err = tx.error || new Error('Tx error'); db.close(); reject(err); };
       tx.objectStore(PDF_STORE).put({ name, data: blob, savedAt: Date.now() }, 'last');
     });
-  } catch (e) {
-    console.warn('Ukladanie do IndexedDB zlyhalo:', e);
-  }
+    result.idb = true;
+  } catch (e) { console.warn('Ukladanie do IndexedDB zlyhalo:', e); }
+
+  return result;
 }
 
+// Obnova: najprv IndexedDB, potom sessionStorage, localStorage, napokon window.name
 async function loadLastPdfRecord() {
-  // 1) window.name – najspoľahlivejšie pri refreshi
-  const wn = readFromWindowName();
-  if (wn) return wn;
+  // 1) IndexedDB – najspoľahlivejšie pre väčšie PDF
+  try {
+    const db = await openPdfDb();
+    const rec = await new Promise((resolve, reject) => {
+      const tx = db.transaction(PDF_STORE, 'readonly');
+      tx.oncomplete = () => db.close();
+      tx.onerror = () => { const err = tx.error || new Error('Tx error'); db.close(); reject(err); };
+      const req = tx.objectStore(PDF_STORE).get('last');
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error || new Error('Get error'));
+    });
+    if (rec && rec.data) {
+      const ab = await rec.data.arrayBuffer();
+      return { name: rec.name || 'PDF', arrayBuffer: ab };
+    }
+  } catch (e) { console.warn('Čítanie z IndexedDB zlyhalo:', e); }
 
   // 2) sessionStorage
   try {
@@ -507,22 +523,9 @@ async function loadLastPdfRecord() {
     }
   } catch (e) { console.warn('Čítanie z localStorage zlyhalo:', e); }
 
-  // 4) IndexedDB – ak je dostupné na danom pôvode
-  try {
-    const db = await openPdfDb();
-    const rec = await new Promise((resolve, reject) => {
-      const tx = db.transaction(PDF_STORE, 'readonly');
-      tx.oncomplete = () => db.close();
-      tx.onerror = () => { const err = tx.error || new Error('Tx error'); db.close(); reject(err); };
-      const req = tx.objectStore(PDF_STORE).get('last');
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => reject(req.error || new Error('Get error'));
-    });
-    if (rec && rec.data) {
-      const ab = await rec.data.arrayBuffer();
-      return { name: rec.name || 'PDF', arrayBuffer: ab };
-    }
-  } catch (e) { console.warn('Čítanie z IndexedDB zlyhalo:', e); }
+  // 4) window.name – posledný pokus (funguje v tom istom tabu)
+  const wn = readFromWindowName();
+  if (wn) return wn;
 
   return null;
 }
@@ -599,19 +602,30 @@ function renderRows() {
     tbody.appendChild(tr);
   });
 }
-function addEmptyRow() { const r = {}; cols.forEach(k => r[k]=''); rows.push(r); sortRowsInPlace(); saveRows(); renderRows(); tbody.lastElementChild?.firstElementChild?.focus(); }
-function addRowWithNumber(num) { const r = {}; cols.forEach(k => r[k]=''); r['Číslo']=String(num); rows.push(r); sortRowsInPlace(); saveRows(); renderRows(); selectRowByNumber(num); }
+function addEmptyRow() {
+  const r = {}; cols.forEach(k => r[k]='');
+  rows.push(r); sortRowsInPlace(); saveRows(); renderRows();
+  tbody.lastElementChild?.firstElementChild?.focus();
+}
+function addRowWithNumber(num) {
+  const r = {}; cols.forEach(k => r[k]='');
+  r['Číslo']=String(num); rows.push(r); sortRowsInPlace(); saveRows(); renderRows(); selectRowByNumber(num);
+}
 
 // Klik na riadok: iba selektuje riadok, nescrolluje mapu
 tbody.addEventListener('click', (e) => {
   const tr = e.target.closest('tr'); if (!tr || e.target.closest('button')) return;
   tbody.querySelectorAll('tr').forEach(r => r.classList.remove('selected')); tr.classList.add('selected');
-  // zámerne nevoláme focusMarkerByNumber – presun robí len ikona „oko“
 });
 
 function selectRowByNumber(num) {
   const i = rows.findIndex(r => parseInt(r['Číslo'],10)===num);
-  if (i>=0) { const tr = tbody.children[i]; tbody.querySelectorAll('tr').forEach(r => r.classList.remove('selected')); tr?.classList.add('selected'); tr?.scrollIntoView({block:'nearest'}); }
+  if (i>=0) {
+    const tr = tbody.children[i];
+    tbody.querySelectorAll('tr').forEach(r => r.classList.remove('selected'));
+    tr?.classList.add('selected');
+    tr?.scrollIntoView({block:'nearest'});
+  }
 }
 addRowBtn.addEventListener('click', addEmptyRow);
 clearRowsBtn.addEventListener('click', () => {
@@ -624,7 +638,8 @@ downloadCsvBtn.addEventListener('click', () => {
   const csvRows = rows.map(r => cols.map(k => (r[k] ?? '').replace(/;/g, ',')).join(';'));
   const csvStr = [csvHeader, ...csvRows].join('\n');
   const blob = new Blob([csvStr], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'zapisnik.csv'; a.click(); URL.revokeObjectURL(url);
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = 'zapisnik.csv'; a.click(); URL.revokeObjectURL(url);
 });
 
 // ---- Markery ----
@@ -633,11 +648,17 @@ const MARKERS_KEY = 'visioMarkers';
 function loadMarkers() { try { const raw = localStorage.getItem(MARKERS_KEY); markers = raw ? JSON.parse(raw) : []; } catch { markers = []; } }
 function saveMarkers() { localStorage.setItem(MARKERS_KEY, JSON.stringify(markers)); }
 function renderMarkers() {
-  markerLayer.innerHTML = ''; markerLayer.style.width = canvas.width + 'px'; markerLayer.style.height = canvas.height + 'px';
+  markerLayer.innerHTML = '';
+  markerLayer.style.width = canvas.width + 'px';
+  markerLayer.style.height = canvas.height + 'px';
   markers.filter(m => m.page===currentPage).forEach(m => {
     const el = document.createElement('div'); el.className='marker'; el.dataset.number=String(m.number); el.textContent=m.number;
     el.style.left = (m.xNorm*canvas.width)+'px'; el.style.top = (m.yNorm*canvas.height)+'px';
-    el.addEventListener('click', () => { selectRowByNumber(m.number); setPanelOpen(true); el.classList.add('pulse'); setTimeout(()=>el.classList.remove('pulse'),1200); });
+    el.addEventListener('click', () => {
+      selectRowByNumber(m.number);
+      setPanelOpen(true);
+      el.classList.add('pulse'); setTimeout(()=>el.classList.remove('pulse'),1200);
+    });
     markerLayer.appendChild(el);
   });
 }
@@ -647,13 +668,20 @@ function getNextNumber() {
   rows.forEach(r => { const n = parseInt(r['Číslo'],10); if (Number.isInteger(n) && n>0) used.add(n); });
   let i=1; while(used.has(i)) i++; return i;
 }
-function removeMarkerByNumber(num) { const before = markers.length; markers = markers.filter(m => m.number!==num); if (markers.length!==before) { saveMarkers(); renderMarkers(); } }
+function removeMarkerByNumber(num) {
+  const before = markers.length; markers = markers.filter(m => m.number!==num);
+  if (markers.length!==before) { saveMarkers(); renderMarkers(); }
+}
 function placeMarkerAtEvent(e) {
   if (e.button!==0) return;
-  const rect = canvas.getBoundingClientRect(); const xPx=e.clientX-rect.left; const yPx=e.clientY-rect.top;
-  const xNorm = xPx/canvas.width, yNorm = yPx/canvas.height; const num = getNextNumber();
-  markers.push({ number:num, page:currentPage, xNorm, yNorm }); saveMarkers(); renderMarkers(); addRowWithNumber(num);
-  const mEl = markerLayer.querySelector(`.marker[data-number="${num}"]`); mEl?.classList.add('pulse'); setTimeout(()=>mEl?.classList.remove('pulse'),1200);
+  const rect = canvas.getBoundingClientRect();
+  const xPx=e.clientX-rect.left; const yPx=e.clientY-rect.top;
+  const xNorm = xPx/canvas.width, yNorm = yPx/canvas.height;
+  const num = getNextNumber();
+  markers.push({ number:num, page:currentPage, xNorm, yNorm });
+  saveMarkers(); renderMarkers(); addRowWithNumber(num);
+  const mEl = markerLayer.querySelector(`.marker[data-number="${num}"]`);
+  mEl?.classList.add('pulse'); setTimeout(()=>mEl?.classList.remove('pulse'),1200);
   statusEl.textContent = 'Pridané číslo ' + num + ' na stranu ' + currentPage;
 }
 async function focusMarkerByNumber(num) {
@@ -674,8 +702,17 @@ fileInput.addEventListener('change', async (e) => {
   try {
     const ab = await file.arrayBuffer();
     await loadPdf(ab, file.name);
-    await saveLastPdf(ab, file.name);
-    statusEl.textContent = 'PDF načítané a uložené pre obnovu: ' + file.name;
+
+    // Ulož a skontroluj, kam sa naozaj podarilo uložiť
+    const flags = await saveLastPdf(ab, file.name);
+    const test = await loadLastPdfRecord(); // over, že sa vieme obnoviť
+
+    const savedTo = Object.entries(flags).filter(([k,v])=>v).map(([k])=>k).join(', ') || 'nič';
+    if (test && test.arrayBuffer) {
+      statusEl.textContent = `PDF načítané. Uložené do: ${savedTo}.`;
+    } else {
+      statusEl.textContent = `PDF načítané, ale nepodarilo sa ho spoľahlivo uložiť (uložené do: ${savedTo}). Skontroluj kvóty/privátny režim.`;
+    }
   } catch (err) {
     console.warn('Načítanie/Uloženie PDF zlyhalo:', err);
     statusEl.textContent = 'PDF sa nepodarilo načítať/uložiť.';
@@ -711,11 +748,20 @@ async function renderPage() {
   await page.render({ canvasContext: ctx, viewport }).promise;
   pageNumInput.value = currentPage; renderMarkers(); savePdfState();
 }
-prevBtn.addEventListener('click', async () => { if (!pdfDoc) return; if (currentPage>1){ currentPage--; await renderPage(); if (fitMode==='window'){ viewer.scrollLeft=0; viewer.scrollTop=0; } } });
-nextBtn.addEventListener('click', async () => { if (!pdfDoc) return; if (currentPage<pdfDoc.numPages){ currentPage++; await renderPage(); if (fitMode==='window'){ viewer.scrollLeft=0; viewer.scrollTop=0; } } });
+prevBtn.addEventListener('click', async () => {
+  if (!pdfDoc) return;
+  if (currentPage>1){ currentPage--; await renderPage(); if (fitMode==='window'){ viewer.scrollLeft=0; viewer.scrollTop=0; } }
+});
+nextBtn.addEventListener('click', async () => {
+  if (!pdfDoc) return;
+  if (currentPage<pdfDoc.numPages){ currentPage++; await renderPage(); if (fitMode==='window'){ viewer.scrollLeft=0; viewer.scrollTop=0; } }
+});
 pageNumInput.addEventListener('change', async () => {
-  if (!pdfDoc) return; let p=parseInt(pageNumInput.value,10); if (isNaN(p)) return;
-  currentPage = Math.max(1, Math.min(p, pdfDoc.numPages)); await renderPage(); if (fitMode==='window'){ viewer.scrollLeft=0; viewer.scrollTop=0; }
+  if (!pdfDoc) return;
+  let p=parseInt(pageNumInput.value,10); if (isNaN(p)) return;
+  currentPage = Math.max(1, Math.min(p, pdfDoc.numPages));
+  await renderPage();
+  if (fitMode==='window'){ viewer.scrollLeft=0; viewer.scrollTop=0; }
 });
 
 // Lupa
@@ -861,7 +907,7 @@ document.addEventListener('keydown',(e)=>{ if(e.key==='Escape' && !dohOverlay.hi
 loadRows(); renderRows(); loadMarkers(); renderMarkers(); if (rows.length===0) addEmptyRow();
 setPanelOpen(false); updatePanelHandleIcon();
 
-// Obnova PDF po načítaní (window.name -> sessionStorage -> localStorage -> IndexedDB)
+// Obnova PDF po načítaní (IndexedDB -> sessionStorage -> localStorage -> window.name)
 window.addEventListener('load', async () => {
   try {
     statusEl.textContent = 'Obnovujem posledné PDF...';
@@ -884,3 +930,5 @@ window.addEventListener('load', async () => {
   }
 });
 </script>
+</body>
+</html>
