@@ -883,4 +883,46 @@ window.addEventListener('load', async () => {
     statusEl.textContent = 'Vyberte PDF súbor (tlačidlo hore vľavo).';
   }
 });
+
+window.addEventListener('load', async () => {
+  try {
+    statusEl.textContent = 'Načítavam PDF a zápisník zo servera...';
+
+    // 1) Načítanie PDF zo súboru v repozitári:
+    const pdfUrl = 'P41_2025.pdf'; // relatívna cesta k PDF
+    const loadingTask = pdfjsLib.getDocument(pdfUrl);
+    pdfDoc = await loadingTask.promise;
+
+    pageCountEl.textContent = pdfDoc.numPages;
+    currentPage = 1;
+    pageNumInput.value = currentPage;
+
+    // 2) Načítanie zápisníka zo súboru JSON podľa tvojej štruktúry
+    const notesUrl = 'zapisnik-export.json'; // alebo iný názov, napr. 'zapisnik-export (4).json' – podľa názvu v repozitári
+    try {
+      const response = await fetch(notesUrl);
+      if (!response.ok) throw new Error('Nepodarilo sa načítať zápisník.');
+      const data = await response.json();
+      if (Array.isArray(data.rows)) rows = data.rows;
+      else rows = [];
+      sortRowsInPlace();
+      saveRows();
+      renderRows();
+    } catch (err) {
+      statusEl.textContent = 'Zápisník sa nepodarilo načítať: ' + err.message;
+      rows = [];
+      renderRows();
+    }
+
+    fitMode = 'window';
+    await renderPage();
+
+    statusEl.textContent = 'Načítané PDF a zápisník zo servera • ' + pdfDoc.numPages + ' strán';
+
+  } catch (err) {
+    console.warn('Chyba pri načítaní PDF alebo zápisníka:', err);
+    statusEl.textContent = 'Nepodarilo sa načítať PDF alebo zápisník.';
+  }
+});  
 </script>
+
