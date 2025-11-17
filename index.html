@@ -258,6 +258,7 @@ body.panel-open #panelHandle { right: var(--side-open-w, calc(var(--side-w) * va
         <label>Dni v období:</label>
         <div class="choices">
           <label><input type="radio" name="dohDays" value="30" checked> DOH30 (30 dní)</label>
+          <label><input type="radio" name="dohDays" value="90"> DOH90 (90 dní)</label>
           <label><input type="radio" name="dohDays" value="360"> DOH360 (360 dní)</label>
         </div>
       </div>
@@ -282,8 +283,8 @@ body.panel-open #panelHandle { right: var(--side-open-w, calc(var(--side-w) * va
       </div>
 
       <div class="field twoCols">
-        <label for="dohPerfPeriod">Výkon za obdobie (súčet za 30/360 dní) [€]</label>
-        <input id="dohPerfPeriod" type="number" inputmode="decimal" placeholder="napr. súčet COGS/COGM za 30/360 dní" />
+        <label for="dohPerfPeriod">Výkon za obdobie (súčet za 30/90/360 dní) [€]</label>
+        <input id="dohPerfPeriod" type="number" inputmode="decimal" placeholder="napr. súčet COGS/COGM za 30/90/360 dní" />
       </div>
 
       <div class="actions">
@@ -896,7 +897,8 @@ function closeDoh(){ dohOverlay.hidden=true; }
 function loadDohPrefs() {
   try {
     const raw=localStorage.getItem(DOH_PREFS_KEY); if (!raw) return; const p=JSON.parse(raw);
-    document.querySelector(`input[name="dohDays"][value="${p.days===360?360:30}"]`).checked=true;
+    const dayInput = document.querySelector(`input[name="dohDays"][value="${p.days}"]`) || document.querySelector(`input[name="dohDays"][value="30"]`);
+    dayInput && (dayInput.checked = true);
     const rt=document.querySelector(`input[name="dohResultType"][value="${p.resultType||'work'}"]`); rt && (rt.checked=true);
     if (typeof p.wdaysPerWeek==='number') dohWdaysPerWeekInput.value=p.wdaysPerWeek;
     if (typeof p.inventory==='number') dohInventoryInput.value=p.inventory;
